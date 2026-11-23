@@ -1,0 +1,69 @@
+# Map each canonical table to your data. Copy this file to sources.yaml and edit it.
+# Run `python -m pressure_screen doctor --sources config/sources.yaml` after every change.
+#
+# kind: parquet | csv | duckdb_sql | marketdb_sql | missing
+# columns: {your_name: canonical_name}
+#
+# The SQL blocks marked TEMPLATE follow common WRDS table names. I have not seen your
+# production schema, so they are untested. The marketdb block is tested on the local warehouse.
+
+tables:
+
+  # Required. One row per issuer. `rating` in S&P or Moody's notation.
+  issuers:
+    kind: parquet
+    path: data/issuers.parquet
+    # columns: {gvkey: issuer_id, gsector_name: sector, sp_rating: rating}
+
+  # Required. One row per issuer and quarter. Flows must be single-quarter values.
+  # Compustat cash-flow items that end in "y" are year-to-date. Subtract the prior quarter first.
+  # `filed_date` must be the day the figures became public. Compustat `rdq` is the usual choice.
+  fundamentals:
+    kind: duckdb_sql
+    database: /path/to/warehouse.duckdb
+    sql: |
+      -- TEMPLATE (Compustat fundq)
+      SELECT gvkey AS issuer_id, datadate AS period_end, rdq AS filed_date,
+             revtq AS revenue, cogsq AS cogs, oibdpq AS ebitda,
+             xintq AS cash_interest,                 -- interest expense, the nearest public figure
+             COALESCE(dlttq, 0) + COALESCE(dlcq, 0) AS total_debt, cheq AS cash
+      FROM comp_fundq WHERE rdq IS NOT NULL AND datadate >= DATE '2015-01-01'
+    # Optional columns, add them when you have them:
+    # undrawn_revolver, fcf, floating_debt, staff_cost, energy_cost, top_customer_share, ig_backed
+
+  # Required. One row per bond or loan.
+  debt_maturities:
+    kind: duckdb_sql
+    database: /path/to/warehouse.duckdb
+    sql: |
+      -- TEMPLATE (Mergent FISD)
+      SELECT issuer_id, maturity AS maturity_date, offering_amt AS amount, coupon,
+             (coupon_type = 'V') AS is_floating, offering_date AS known_date
+      FROM fisd_mergedissue
+
+  # Required. Daily prices per issuer. Tested on the local marketdb warehouse.
+  # It removes the second report of each inter-dealer trade and the rows with no issuer.
+  bond_prices:
+    kind: marketdb_sql
+    sql: |
+      -- yld_pt is text in this warehouse and is empty on about a third of trades.
+      -- The yield is weighted over the trades that carry one. Days with no yield are dropped.
+      SELECT company_symbol AS issuer_id, cusip, trd_exctn_dt AS date,
+             sum(rptd_pr * entrd_vol_qt) / sum(entrd_vol_qt) AS price,
+             sum(TRY_CAST(yld_pt AS DOUBLE) * entrd_vol_qt)
+               / sum(CASE WHEN TRY_CAST(yld_pt AS DOUBLE) IS NOT NULL THEN entrd_vol_qt END) AS yield_pct,
+             sum(entrd_vol_qt) AS volume
+      FROM trace
+      WHERE company_symbol IS NOT NULL AND entrd_vol_qt > 0
+        AND NOT (cntra_mp_id = 'D' AND rpt_side_cd = 'B')
+      GROUP BY 1, 2, 3
+      HAVING sum(TRY_CAST(yld_pt AS DOUBLE)) IS NOT NULL
+    # Add years_to_maturity by joining bond terms. Without it the spread uses the 5-year Treasury.
+
+  equity_prices:      {kind: missing}   # issuer_id, date, close (adjusted)
+  ratings_history:    {kind: missing}   # issuer_id, date, rating. Needed for the backtest.
+  defaults:           {kind: missing}   # issuer_id, date, event. Needed for the backtest.
+  macro_ism:          {kind: missing}   # date, ism (monthly)
+  macro_input_prices: {kind: missing}   # sector, date, index
+  tier_yields:        {kind: missing}   # tier, date, yield_pct, spread_bp
+  treasury_curve:     {kind: missing}   # date, tenor_years, yield_pct

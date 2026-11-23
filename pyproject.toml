@@ -1,0 +1,12 @@
+[project]
+name = "pressure-screen"
+version = "0.1.0"
+description = "Issuer pressure screen for persistent inflation with slowing growth. Research only."
+requires-python = ">=3.10"
+dependencies = ["pandas>=2.0", "numpy", "pyyaml", "pyarrow", "duckdb"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
